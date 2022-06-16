@@ -5,9 +5,14 @@
 
 #define NUM_THREADS 4
 
+double chunk_size;
+
+typedef struct {
+    int x_min;
+    int x_max;
+} Chunk;
+
 pthread_t tid[NUM_THREADS];
-pthread_mutex_t counter_mutex = PTHREAD_MUTEX_INITIALIZER;
-int counter = 0;
 
 double c_x_min;
 double c_x_max;
@@ -58,12 +63,12 @@ void allocate_image_buffer(){
 
 void init(int argc, char *argv[]){
     if(argc < 6){
-        printf("usage: ./mandelbrot_pth c_x_min c_x_max c_y_min c_y_max image_size\n");
+        printf("usage: ./mandelbrot_seq c_x_min c_x_max c_y_min c_y_max image_size\n");
         printf("examples with image_size = 11500:\n");
-        printf("    Full Picture:         ./mandelbrot_pth -2.5 1.5 -2.0 2.0 11500\n");
-        printf("    Seahorse Valley:      ./mandelbrot_pth -0.8 -0.7 0.05 0.15 11500\n");
-        printf("    Elephant Valley:      ./mandelbrot_pth 0.175 0.375 -0.1 0.1 11500\n");
-        printf("    Triple Spiral Valley: ./mandelbrot_pth -0.188 -0.012 0.554 0.754 11500\n");
+        printf("    Full Picture:         ./mandelbrot_seq -2.5 1.5 -2.0 2.0 11500\n");
+        printf("    Seahorse Valley:      ./mandelbrot_seq -0.8 -0.7 0.05 0.15 11500\n");
+        printf("    Elephant Valley:      ./mandelbrot_seq 0.175 0.375 -0.1 0.1 11500\n");
+        printf("    Triple Spiral Valley: ./mandelbrot_seq -0.188 -0.012 0.554 0.754 11500\n");
         exit(0);
     }
     else{
@@ -79,6 +84,7 @@ void init(int argc, char *argv[]){
 
         pixel_width       = (c_x_max - c_x_min) / i_x_max;
         pixel_height      = (c_y_max - c_y_min) / i_y_max;
+        chunk_size = i_x_max/NUM_THREADS; // chunk size based on number of threads
     };
 };
 
@@ -118,7 +124,12 @@ void write_to_file(){
     fclose(file);
 };
 
-void compute_mandelbrot(int x, int y){
+void *compute_mandelbrot(void *thread_chunk){
+    /* Capture thread chunk. */
+    Chunk *chunk = (Chunk *)thread_chunk;
+    int chunk_min = chunk->x_min;
+    int chunk_max = chunk->x_max;
+    
     double z_x;
     double z_y;
     double z_x_squared;
@@ -126,67 +137,65 @@ void compute_mandelbrot(int x, int y){
     double escape_radius_squared = 4;
 
     int iteration;
+    int i_x;
+    int i_y;
 
     double c_x;
     double c_y;
 
-    c_y = c_y_min + y * pixel_height;
+    /* Loop over chunk boundaries. */
+    for(i_y = chunk_min; i_y < chunk_max; i_y++){
+        c_y = c_y_min + i_y * pixel_height;
 
-    if(fabs(c_y) < pixel_height / 2){
-        c_y = 0.0;
+        if(fabs(c_y) < pixel_height / 2){
+            c_y = 0.0;
+        };
+
+        for(i_x = 0; i_x < i_x_max; i_x++){
+            c_x         = c_x_min + i_x * pixel_width;
+
+            z_x         = 0.0;
+            z_y         = 0.0;
+
+            z_x_squared = 0.0;
+            z_y_squared = 0.0;
+
+            for(iteration = 0;
+                iteration < iteration_max && \
+                ((z_x_squared + z_y_squared) < escape_radius_squared);
+                iteration++){
+                z_y         = 2 * z_x * z_y + c_y;
+                z_x         = z_x_squared - z_y_squared + c_x;
+
+                z_x_squared = z_x * z_x;
+                z_y_squared = z_y * z_y;
+            };
+
+            update_rgb_buffer(iteration, i_x, i_y);
+        };
     };
-
-    c_x         = c_x_min + x * pixel_width;
-
-    z_x         = 0.0;
-    z_y         = 0.0;
-
-    z_x_squared = 0.0;
-    z_y_squared = 0.0;
-
-    for(iteration = 0;
-        iteration < iteration_max && \
-        ((z_x_squared + z_y_squared) < escape_radius_squared);
-        iteration++){
-        z_y         = 2 * z_x * z_y + c_y;
-        z_x         = z_x_squared - z_y_squared + c_x;
-
-        z_x_squared = z_x * z_x;
-        z_y_squared = z_y * z_y;
-    };
-
-    update_rgb_buffer(iteration, x, y);
 };
-
-void *worker() {
-    int x;
-    int y;
-
-    while (counter < image_buffer_size) {
-        pthread_mutex_lock(&counter_mutex);
-        x = counter % i_y_max;
-        y = counter / i_y_max;
-        counter++;
-        pthread_mutex_unlock(&counter_mutex);
-        
-        if (counter >= image_buffer_size) {
-            break;
-        }
-        compute_mandelbrot(x, y);
-    }
-}
 
 int main(int argc, char *argv[]){
     init(argc, argv);
 
     allocate_image_buffer();
 
-    for (int i = 0; i < NUM_THREADS; i++) {
-        pthread_create(&tid[i], NULL, worker, NULL);
+    /* Allocate a specific chunk for each thread. */
+    Chunk chunks[NUM_THREADS];
+    for(int i=0;i<NUM_THREADS; i++) {
+        chunks[i].x_min = i*chunk_size;
+        chunks[i].x_max = (i+1)*chunk_size;
     }
 
-    for (int j = 0; j < NUM_THREADS; j++) {
-        pthread_join(tid[j], NULL);
+    for(int i=0; i<NUM_THREADS; i++) {
+        /* Loop over all threads. */
+        pthread_create(&tid[i], NULL, compute_mandelbrot, &chunks[i]);
+    }
+
+    for(int i=0; i<NUM_THREADS; i++) {
+        /* Wait for all threads to complete. */
+        pthread_join(tid[i], NULL);
     }
 
     write_to_file();

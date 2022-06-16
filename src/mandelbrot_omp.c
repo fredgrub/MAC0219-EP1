@@ -128,10 +128,14 @@ void compute_mandelbrot(){
     double c_x;
     double c_y;
 
+    /* Define parallel block with shared and private variables; */
+    /* Also specify the number of threads to use for parallel computation. */
     #pragma omp parallel shared(escape_radius_squared) private(z_x, z_y, z_x_squared, z_y_squared, \
     iteration, i_x, i_y, c_x, c_y) num_threads(NUM_THREADS)
     {
-        #pragma omp for schedule(static)
+        /* Dynamic schedule since each iteration can take */
+        /* different amounts of time. */
+        #pragma omp for schedule(dynamic)
         for(i_y = 0; i_y < i_y_max; i_y++){
             c_y = c_y_min + i_y * pixel_height;
 
