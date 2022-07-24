@@ -5,12 +5,12 @@
 
 #define NUM_THREADS 4
 
-double chunk_size;
+double limit_size;
 
 typedef struct {
-    int x_min;
-    int x_max;
-} Chunk;
+    int min;
+    int max;
+} Limits;
 
 pthread_t tid[NUM_THREADS];
 
@@ -84,7 +84,7 @@ void init(int argc, char *argv[]){
 
         pixel_width       = (c_x_max - c_x_min) / i_x_max;
         pixel_height      = (c_y_max - c_y_min) / i_y_max;
-        chunk_size = i_x_max/NUM_THREADS; // chunk size based on number of threads
+        limit_size = i_y_max/NUM_THREADS; // sets the size of the boundary to split the figure
     };
 };
 
@@ -124,11 +124,11 @@ void write_to_file(){
     fclose(file);
 };
 
-void *compute_mandelbrot(void *thread_chunk){
-    /* Capture thread chunk. */
-    Chunk *chunk = (Chunk *)thread_chunk;
-    int chunk_min = chunk->x_min;
-    int chunk_max = chunk->x_max;
+void *compute_mandelbrot(void *thread_limits){
+    /* Capture thread bounds. */
+    Limits *limits = (Limits *)thread_limits;
+    int y_min = limits->min;
+    int y_max = limits->max;
     
     double z_x;
     double z_y;
@@ -143,8 +143,8 @@ void *compute_mandelbrot(void *thread_chunk){
     double c_x;
     double c_y;
 
-    /* Loop over chunk boundaries. */
-    for(i_y = chunk_min; i_y < chunk_max; i_y++){
+    /* Compute the set within the defined limits. */
+    for(i_y = y_min; i_y < y_max; i_y++){
         c_y = c_y_min + i_y * pixel_height;
 
         if(fabs(c_y) < pixel_height / 2){
@@ -181,19 +181,19 @@ int main(int argc, char *argv[]){
 
     allocate_image_buffer();
 
-    /* Allocate a specific chunk for each thread. */
-    Chunk chunks[NUM_THREADS];
-    for(int i=0;i<NUM_THREADS; i++) {
-        chunks[i].x_min = i*chunk_size;
-        chunks[i].x_max = (i+1)*chunk_size;
+    /* Sets the limits of each thread. */
+    Limits limits[NUM_THREADS];
+    for(int i=0; i < NUM_THREADS; i++) {
+        limits[i].min = i*limit_size;
+        limits[i].max = (i+1)*limit_size;
     }
 
-    for(int i=0; i<NUM_THREADS; i++) {
-        /* Loop over all threads. */
-        pthread_create(&tid[i], NULL, compute_mandelbrot, &chunks[i]);
+    for(int i=0; i < NUM_THREADS; i++) {
+        /* Create threads to compute Mandelbrot set. */
+        pthread_create(&tid[i], NULL, compute_mandelbrot, &limits[i]);
     }
 
-    for(int i=0; i<NUM_THREADS; i++) {
+    for(int i=0; i < NUM_THREADS; i++) {
         /* Wait for all threads to complete. */
         pthread_join(tid[i], NULL);
     }
