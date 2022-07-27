@@ -1,16 +1,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#include <mpi.h>
 #include <pthread.h>
 
 #define NUM_THREADS 4
 
 double limit_size;
 
+/* Structs to store mandelbrot arguments for thread_create() */
+
 typedef struct {
     int min;
     int max;
 } Limits;
+
+typedef struct {
+    Limits limits;
+    int height_start;
+    int height_end;
+} MPI_Args;
 
 pthread_t tid[NUM_THREADS];
 
@@ -61,6 +70,24 @@ void allocate_image_buffer(){
     };
 };
 
+void contiguous_image_buffer_allocation(){
+    unsigned char *data;
+    int data_size;
+    int rgb_size = 3;
+
+    /* N pointers of M objects => N*M objects */
+    data_size = image_buffer_size * rgb_size;
+
+    /* Allocate spaces in memory for data and buffer */
+    data = (unsigned char *) malloc(sizeof(unsigned char) * data_size);
+    image_buffer = (unsigned char **) malloc(sizeof(unsigned char *) * image_buffer_size);
+
+    /* Contiguously allocation of data and buffer */
+    for(int i = 0; i < image_buffer_size; i++){
+        image_buffer[i] = &(data[rgb_size*i]);
+    }
+}
+
 void init(int argc, char *argv[]){
     if(argc < 6){
         printf("usage: ./mandelbrot_seq c_x_min c_x_max c_y_min c_y_max image_size\n");
@@ -84,7 +111,8 @@ void init(int argc, char *argv[]){
 
         pixel_width       = (c_x_max - c_x_min) / i_x_max;
         pixel_height      = (c_y_max - c_y_min) / i_y_max;
-        limit_size = i_y_max / NUM_THREADS; // sets the size of the boundary to split the figure
+
+        limit_size = i_x_max / NUM_THREADS; // sets the size of the boundary to split the figure
     };
 };
 
@@ -124,12 +152,19 @@ void write_to_file(){
     fclose(file);
 };
 
-void *compute_mandelbrot(void *thread_limits){
-    /* Capture thread bounds. */
-    Limits *limits = (Limits *)thread_limits;
-    int y_min = limits->min;
-    int y_max = limits->max;
+void *compute_mandelbrot(void *inputs){
+    /* Convert the inputs. */
+    MPI_Args *args = (MPI_Args *)inputs;
     
+    /* Capture MPI bounds. */
+    int height_start = args->height_start;
+    int height_end = args->height_end;
+
+    /* Capture thread bounds. */
+    Limits limits = args->limits;
+    int x_min = limits.min;
+    int x_max = limits.max;
+
     double z_x;
     double z_y;
     double z_x_squared;
@@ -143,15 +178,15 @@ void *compute_mandelbrot(void *thread_limits){
     double c_x;
     double c_y;
 
-    /* Compute the set within the defined limits. */
-    for(i_y = y_min; i_y < y_max; i_y++){
+    for(i_y = height_start; i_y < height_end; i_y++){
         c_y = c_y_min + i_y * pixel_height;
 
         if(fabs(c_y) < pixel_height / 2){
             c_y = 0.0;
         };
 
-        for(i_x = 0; i_x < i_x_max; i_x++){
+        /* Compute the set within the defined limits. */
+        for(i_x = x_min; i_x < x_max; i_x++){
             c_x         = c_x_min + i_x * pixel_width;
 
             z_x         = 0.0;
@@ -177,9 +212,39 @@ void *compute_mandelbrot(void *thread_limits){
 };
 
 int main(int argc, char *argv[]){
+    int my_rank, comm_size;
+    int height_start, height_end;
+    int local_height;
+    MPI_Status status;
+
+    
+    /* MPI initialization */
+    MPI_Init(&argc, &argv);
+    
+    /* Read the inputs */
     init(argc, argv);
 
-    allocate_image_buffer();
+    /* Get process ID and communication size */
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+
+    /* Divide the height into blocks */
+    int height_step = i_y_max / comm_size;
+
+    /* Defines the boundaries of each process */
+    if(my_rank == 0){
+        height_start = 0;
+        local_height = i_y_max - (comm_size - 1)*height_step;
+        height_end = local_height;
+    }
+    else{
+        local_height = height_step;
+        height_start = (i_y_max - (comm_size - 1)*height_step) + (my_rank - 1)*local_height;
+        height_end = height_start + height_step;
+    }
+
+    /* Contiguous allocation of image buffer */
+    contiguous_image_buffer_allocation();
 
     /* Sets the limits of each thread. */
     Limits limits[NUM_THREADS];
@@ -188,9 +253,19 @@ int main(int argc, char *argv[]){
         limits[i].max = (i+1)*limit_size;
     }
 
+    /* Struct to store compute_mandelbrot() arguments */
+    MPI_Args args[NUM_THREADS];
+    for(int i=0; i < NUM_THREADS; i++) {
+        args[i].limits.min = limits[i].min;
+        args[i].limits.max = limits[i].max;
+        args[i].height_start = height_start;
+        args[i].height_end = height_end;
+    }
+
+    /* Each process computes the mandelbrot within its limits */
     for(int i=0; i < NUM_THREADS; i++) {
         /* Create threads to compute Mandelbrot set. */
-        pthread_create(&tid[i], NULL, compute_mandelbrot, &limits[i]);
+        pthread_create(&tid[i], NULL, compute_mandelbrot, &args[i]);
     }
 
     for(int i=0; i < NUM_THREADS; i++) {
@@ -198,7 +273,22 @@ int main(int argc, char *argv[]){
         pthread_join(tid[i], NULL);
     }
 
-    write_to_file();
+    /* Process 0 gathers the calculation of the other */
+    /* processes and writes it to the file            */
+    if(my_rank == 0){
+        int recv_start;
+        for(int i = 1; i < comm_size; i++){
+            recv_start = (i_y_max - (comm_size - 1)*height_step) + (i - 1)*local_height;
+            MPI_Recv(&(image_buffer[(i_y_max * recv_start) + 0][0]), height_step*i_x_max*3, MPI_UNSIGNED_CHAR, i, 1, MPI_COMM_WORLD, &status);
+        }
+    }
+    else{
+        MPI_Send(&(image_buffer[(i_y_max * height_start) + 0][0]), height_step*i_x_max*3, MPI_UNSIGNED_CHAR, 0, 1, MPI_COMM_WORLD);
+    }
 
-    return 0;
+    if(my_rank == 0){
+        write_to_file();
+    }
+
+    MPI_Finalize();
 };

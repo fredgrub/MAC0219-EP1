@@ -1,0 +1,26 @@
+OUTPUT=mandelbrot
+
+IMAGE=.ppm
+
+MCC=mpicc
+CC_OPT=-std=c11
+
+CC_OMP=-fopenmp
+CC_PTH=-pthread
+
+.PHONY: all
+
+all: $(OUTPUT)_mpi $(OUTPUT)_mpi_omp $(OUTPUT)_mpi_pth
+
+$(OUTPUT)_mpi: $(OUTPUT)_mpi.c
+	$(MCC) -o $(OUTPUT)_mpi $(OUTPUT)_mpi.c
+
+$(OUTPUT)_mpi_omp: $(OUTPUT)_mpi_omp.c
+	$(MCC) -o $(OUTPUT)_mpi_omp $(CC_OPT) $(CC_OMP) $(OUTPUT)_mpi_omp.c
+
+$(OUTPUT)_mpi_pth: $(OUTPUT)_mpi_pth.c
+	$(MCC) -o $(OUTPUT)_mpi_pth $(CC_OPT) $(CC_PTH) $(OUTPUT)_mpi_pth.c
+
+.PHONY: clean
+clean:
+	rm $(OUTPUT)_mpi $(OUTPUT)_mpi_omp $(OUTPUT)_mpi_pth *$(IMAGE)

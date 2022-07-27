@@ -1,18 +1,14 @@
+#include "mpi.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
-#include <pthread.h>
 
-#define NUM_THREADS 4
+#define LEADER 0
 
-double limit_size;
+int step_size;
 
-typedef struct {
-    int min;
-    int max;
-} Limits;
-
-pthread_t tid[NUM_THREADS];
+int rgb_size = 3;
 
 double c_x_min;
 double c_x_max;
@@ -27,6 +23,8 @@ int iteration_max = 200;
 int image_size;
 unsigned char **image_buffer;
 
+int i_x_min;
+int i_y_min;
 int i_x_max;
 int i_y_max;
 int image_buffer_size;
@@ -53,7 +51,6 @@ int colors[17][3] = {
                     };
 
 void allocate_image_buffer(){
-    int rgb_size = 3;
     image_buffer = (unsigned char **) malloc(sizeof(unsigned char *) * image_buffer_size);
 
     for(int i = 0; i < image_buffer_size; i++){
@@ -61,7 +58,7 @@ void allocate_image_buffer(){
     };
 };
 
-void init(int argc, char *argv[]){
+void init(int argc, char *argv[], int my_id, int numtasks){
     if(argc < 6){
         printf("usage: ./mandelbrot_seq c_x_min c_x_max c_y_min c_y_max image_size\n");
         printf("examples with image_size = 11500:\n");
@@ -78,13 +75,22 @@ void init(int argc, char *argv[]){
         sscanf(argv[4], "%lf", &c_y_max);
         sscanf(argv[5], "%d", &image_size);
 
-        i_x_max           = image_size;
-        i_y_max           = image_size;
-        image_buffer_size = image_size * image_size;
+        i_x_max = image_size;
+        i_y_max = image_size;
 
-        pixel_width       = (c_x_max - c_x_min) / i_x_max;
-        pixel_height      = (c_y_max - c_y_min) / i_y_max;
-        limit_size = i_y_max / NUM_THREADS; // sets the size of the boundary to split the figure
+        pixel_width  = (c_x_max - c_x_min) / i_x_max;
+        pixel_height = (c_y_max - c_y_min) / i_y_max;
+
+        step_size = image_size / numtasks;
+
+        /* LEADER task will allocate full buffer. */
+        if(my_id == LEADER){
+            image_buffer_size = image_size * image_size;
+        }
+        /* Other tasks will allocate local buffer. */
+        else{
+            image_buffer_size = image_size * step_size;
+        }
     };
 };
 
@@ -92,16 +98,16 @@ void update_rgb_buffer(int iteration, int x, int y){
     int color;
 
     if(iteration == iteration_max){
-        image_buffer[(i_y_max * y) + x][0] = colors[gradient_size][0];
-        image_buffer[(i_y_max * y) + x][1] = colors[gradient_size][1];
-        image_buffer[(i_y_max * y) + x][2] = colors[gradient_size][2];
+        image_buffer[(step_size * y) + x][0] = colors[gradient_size][0];
+        image_buffer[(step_size * y) + x][1] = colors[gradient_size][1];
+        image_buffer[(step_size * y) + x][2] = colors[gradient_size][2];
     }
     else{
         color = iteration % gradient_size;
 
-        image_buffer[(i_y_max * y) + x][0] = colors[color][0];
-        image_buffer[(i_y_max * y) + x][1] = colors[color][1];
-        image_buffer[(i_y_max * y) + x][2] = colors[color][2];
+        image_buffer[(step_size * y) + x][0] = colors[color][0];
+        image_buffer[(step_size * y) + x][1] = colors[color][1];
+        image_buffer[(step_size * y) + x][2] = colors[color][2];
     };
 };
 
@@ -124,12 +130,7 @@ void write_to_file(){
     fclose(file);
 };
 
-void *compute_mandelbrot(void *thread_limits){
-    /* Capture thread bounds. */
-    Limits *limits = (Limits *)thread_limits;
-    int y_min = limits->min;
-    int y_max = limits->max;
-    
+void compute_mandelbrot(int my_id){
     double z_x;
     double z_y;
     double z_x_squared;
@@ -143,9 +144,8 @@ void *compute_mandelbrot(void *thread_limits){
     double c_x;
     double c_y;
 
-    /* Compute the set within the defined limits. */
-    for(i_y = y_min; i_y < y_max; i_y++){
-        c_y = c_y_min + i_y * pixel_height;
+    for(i_y = 0; i_y < step_size; i_y++){
+        c_y = (c_y_min + my_id*step_size) + i_y * pixel_height;
 
         if(fabs(c_y) < pixel_height / 2){
             c_y = 0.0;
@@ -177,28 +177,55 @@ void *compute_mandelbrot(void *thread_limits){
 };
 
 int main(int argc, char *argv[]){
-    init(argc, argv);
+    int numtasks, taskid;
 
+    /*** INITIALIZATIONS ***/
+    MPI_Init(&argc, &argv);
+    MPI_Status *status;
+    MPI_Comm_size(MPI_COMM_WORLD, &numtasks);
+    MPI_Comm_rank(MPI_COMM_WORLD, &taskid);
+
+    init(argc, argv, taskid, numtasks);
+
+    printf("==> image_buffer_size = %d at task %d\n", image_buffer_size, taskid);
+
+    /* FOLLOWER tasks allocates local buffer. */
     allocate_image_buffer();
 
-    /* Sets the limits of each thread. */
-    Limits limits[NUM_THREADS];
-    for(int i=0; i < NUM_THREADS; i++) {
-        limits[i].min = i*limit_size;
-        limits[i].max = (i+1)*limit_size;
+    compute_mandelbrot(taskid);
+
+    /* TODO: Send and Recive local buffer and copy it to full buffer. */
+    if(taskid == LEADER){
+        int running_followers = numtasks - 1;
+        int recv_buffer_size = image_size * step_size;
+        while(running_followers--){
+            for(int i = 0; i < recv_buffer_size; i++){
+                unsigned char tmp_rgb[rgb_size];
+                MPI_Recv(&tmp_rgb, rgb_size, MPI_UNSIGNED_CHAR, MPI_ANY_SOURCE, 1, MPI_COMM_WORLD, status);
+                memcpy(&image_buffer[status->MPI_SOURCE * step_size + i], tmp_rgb, sizeof(unsigned char) * rgb_size);
+            }
+        }
+    }
+    else{
+        for(int i = 0; i < image_buffer_size; i++){
+            MPI_Send(&image_buffer[i], rgb_size, MPI_UNSIGNED_CHAR, LEADER, 1, MPI_COMM_WORLD);
+        }
     }
 
-    for(int i=0; i < NUM_THREADS; i++) {
-        /* Create threads to compute Mandelbrot set. */
-        pthread_create(&tid[i], NULL, compute_mandelbrot, &limits[i]);
+
+    if(taskid == LEADER){
+        printf("Writing to file...");
+        write_to_file();
     }
 
-    for(int i=0; i < NUM_THREADS; i++) {
-        /* Wait for all threads to complete. */
-        pthread_join(tid[i], NULL);
-    }
+    MPI_Finalize();
+
+    /*init(argc, argv);
+    allocate_image_buffer();
+
+    compute_mandelbrot();
 
     write_to_file();
 
-    return 0;
+    return 0;*/
 };
